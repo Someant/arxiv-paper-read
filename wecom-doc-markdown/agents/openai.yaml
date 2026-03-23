@@ -1,0 +1,7 @@
+interface:
+  display_name: "WeCom Doc Markdown"
+  short_description: "Format scannable WeCom document content"
+  default_prompt: "Use $wecom-doc-markdown to rewrite this content into a WeCom-friendly Markdown document."
+
+policy:
+  allow_implicit_invocation: true
