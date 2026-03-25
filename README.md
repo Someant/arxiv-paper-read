@@ -2,6 +2,37 @@
 
 A toolset for automatically reading and reviewing arXiv papers, specifically focusing on the `cs.CV` category.
 
+## Workflow
+
+```mermaid
+graph TD
+    subgraph paper-read [paper-read Pipeline]
+    A[arXiv Daily Crawl] --> B{Abstract Screening}
+    B -->|Passed| C[Download PDF]
+    B -->|Discarded| Z[End]
+    C --> D{PDF Screening}
+    D -->|Passed| E[Trigger paper-read-reviewer]
+    D -->|Discarded| Z
+    end
+
+    subgraph paper-read-reviewer [paper-read-reviewer Subagent]
+    E --> F[Full PDF Parsing]
+    F --> G[Deep Analysis: Contribution/Exp/Ablation]
+    G --> H{OpenJudge 5-Stage Review}
+    subgraph OpenJudge [OpenJudge Pipeline]
+    H --> H1[Security Check]
+    H --> H2[Correctness Check]
+    H --> H3[Academic Review]
+    H --> H4[Criticality Verification]
+    H --> H5[BibCheck]
+    end
+    H1 & H2 & H3 & H4 & H5 --> I[Synthesize Review Result]
+    end
+
+    I --> J[Final Markdown Report Generation]
+    J --> K[WeCom Push / Slack Notification]
+```
+
 ## Components
 
 ### 1. [paper-read](./paper-read)
