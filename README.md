@@ -7,10 +7,20 @@ A toolset for automatically reading and reviewing arXiv papers, specifically foc
 ```mermaid
 graph TD
     subgraph paper-read [paper-read Pipeline]
-    A[arXiv Daily Crawl] --> B{Abstract Screening}
-    B -->|Passed| C[Download PDF]
-    B -->|Discarded| Z[End]
-    C --> D{PDF Screening}
+    A[arXiv Daily Crawl] --> B{Abstract-level Screening}
+    B -->|Score >= 4| C[Download PDF]
+    B -->|Score 2-3| B1[Abstract Summary Only]
+    B -->|Score <= 1| Z[Discard]
+    
+    subgraph scoring [Quick Scoring Matrix]
+    B -- "Novelty (0-2)" --- B_S
+    B -- "Importance (0-2)" --- B_S
+    B -- "Experiment (0-1)" --- B_S
+    B -- "Institution (0-1)" --- B_S
+    B_S[Total Score / 6]
+    end
+
+    C --> D{PDF-level Screening}
     D -->|Passed| E[Trigger paper-read-reviewer]
     D -->|Discarded| Z
     end
@@ -31,7 +41,22 @@ graph TD
 
     I --> J[Final Markdown Report Generation]
     J --> K[WeCom Push / Slack Notification]
+    B1 --> J
 ```
+
+## Quick Scoring Matrix
+
+In Stage 1 (Abstract Screening), papers are evaluated based on their title and abstract (no PDF download yet):
+
+- **Novelty (0-2)**: New paradigms or meaningful improvements.
+- **Importance (0-2)**: Core CV problems (Video, 3D, Multi-modal, Foundation Models).
+- **Experiment (0-1)**: SOTA comparisons with specific performance numbers.
+- **Institution (0-1)**: Top-tier AI labs or recognized research groups.
+
+**Selection Rules**:
+- **Score ≥ 4**: Selected for Deep Review (PDF download).
+- **Score 2-3**: Included in the "Abstract-only Summary" section.
+- **Score ≤ 1**: Discarded.
 
 ## Components
 
