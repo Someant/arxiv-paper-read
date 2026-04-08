@@ -205,6 +205,7 @@ for each batch of 5 papers:
    - `{pdf_path}` → 本地 PDF 路径（来自 `arxiv_selected.json` 的 `pdf_path` 字段）
    - `{submission_date}` → arXiv 提交日期（格式 `YYYY-MM-DD`，来自元数据）
    - `{abstract}` → 论文摘要
+   - `{abs_url}` → ArXiv 详情页链接（来自 `arxiv_selected.json` 的 `abs_url` 字段）
 4. 将替换后的字符串作为 Task subagent 的完整 prompt 传入
 
 **禁止事项：**
@@ -258,7 +259,15 @@ OpenJudge 五阶段输出综合为最终评级：
 
 ### 1. [标题](abs_url) — X/6（Accept）
 
+**原文链接**: [abs_url](abs_url)
+
 **作者**: ... | **分类**: ... | **机构**: ...
+
+> **视觉速览**（仅高分论文）：
+> ![架构图]({architecture_img})
+> *图 1: 模型架构图*
+> ![实验结果]({benchmark_img})
+> *图 2: 核心实验结果*
 
 #### 核心贡献
 ...
