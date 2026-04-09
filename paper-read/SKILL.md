@@ -32,25 +32,45 @@ description: 自动爬取 arXiv cs.CV 当天所有新论文，两阶段筛选：
 
 ```
 任务进度：
-- [ ] Step 1：安装依赖
+- [ ] Step 0：[前置检查] 查询最近 7 天是否有过精读，如有则跳过
+- [ ] Step 1：安装依赖与创建 papers/{date} 目录
 - [ ] Step 2：爬取当天全量论文元数据（含摘要）
 - [ ] Step 3：[阶段 1] Agent 读全量摘要，初筛出 Top N
 - [ ] Step 4：下载 Top N 论文的 PDF
 - [ ] Step 5：[阶段 2] 批量并行启动 Task subagent 精读（agent=5，每批 5 篇并行）
              └─ 每个 subagent：读 PDF 全文 → 深度分析 → OpenJudge 五阶段 → 写结果 JSON
-- [ ] Step 6：主 agent 收集全部结果，综合打分、排序、生成 Markdown 报告
-- [ ] Step 7：清理本地 PDF 文件
+- [ ] Step 6：主 agent 收集全部结果，生成 Markdown 报告并保存至 papers/{date}/
+- [ ] Step 7：清理 /tmp 缓存文件（保留 papers/{date} 结果）
 ```
 
 > **Token 预算说明**：精读 + 审稿是重度 token 任务（单篇 PDF 可达 15-30k tokens），绝不在主 agent 内循环处理所有论文。每篇论文独立分配一个 Task subagent，在 200k 上下文内完整处理完再结束，避免主 agent 耗尽上下文。
 
 ---
 
-## Step 1：安装依赖
+## Step 0：前置检查 — 最近一周精读校验
 
+在开始任何操作前，主 Agent 必须检查本地 `papers/` 目录：
+1. **获取日期**：确定当前日期（YYYY-MM-DD）。
+2. **扫描目录**：列出 `papers/` 下所有以日期命名的子目录。
+3. **校验逻辑**：如果有任何目录的日期与当前日期的差距 **≤ 7 天**，则认为最近已完成过精读。
+4. **决策**：
+   - 若发现最近 7 天内有过精读：向用户报告"最近 7 天内已于 {found_date} 完成过论文精读，本次将跳过"，并**中止任务**。
+   - 若没有发现：继续执行后续步骤。
+
+---
+
+## Step 1：环境准备
+
+### 1.1 安装依赖
 ```bash
 pip install requests beautifulsoup4
 ```
+
+### 1.2 创建本地存储目录
+```bash
+mkdir -p papers/$(date +%Y-%m-%d)
+```
+后续生成的报告和关键数据将持久化保存于此，而不是随着清理步骤消失。
 
 ---
 
@@ -221,6 +241,11 @@ for each batch of 5 papers:
 
 > **执行时机**：等待所有 subagent 完成（`/tmp/arxiv_results/` 下的 JSON 数量 = 精读论文数）后，由**主 agent** 执行本步骤。读取全部 `{arxiv_id}.json`，汇总评分、排序、生成最终 Markdown 报告。
 
+### 存储路径
+- **Markdown 报告**: `papers/{date}/arxiv-{category}-{date}-report.md`
+- **结果 JSON**: 将 `/tmp/arxiv_results/` 下的所有文件复制或移动到 `papers/{date}/results/`
+- **元数据**: 复制 `/tmp/arxiv_screening.json` 和 `/tmp/arxiv_selected.json` 到 `papers/{date}/`
+
 ### 最终综合评分逻辑
 
 OpenJudge 五阶段输出综合为最终评级：
@@ -263,11 +288,13 @@ OpenJudge 五阶段输出综合为最终评级：
 
 **作者**: ... | **分类**: ... | **机构**: ...
 
-> **视觉速览**（仅高分论文）：
-> ![架构图]({architecture_img})
-> *图 1: 模型架构图*
-> ![实验结果]({benchmark_img})
-> *图 2: 核心实验结果*
+**架构图（从 PDF 页面裁整块 Figure）**
+
+![架构图]({architecture_img})
+
+**结果图 / Benchmark（从 PDF 页面裁整块 Figure/Table）**
+
+![实验结果]({benchmark_img})
 
 #### 核心贡献
 ...
@@ -325,14 +352,63 @@ OpenJudge 五阶段输出综合为最终评级：
 ...
 ```
 
+### 视觉材料提取实践（新增经验）
+
+生成最终 Markdown 报告时，**不要只给图片路径，也不要只抽 PDF 内嵌 raster image**。应遵循以下规则：
+
+1. **报告中直接嵌图**
+   - 在 Markdown 中直接使用 `![](...)` 展示图片。
+   - 不要仅写“图片路径：...”，否则报告可读性很差。
+
+2. **只保留两类图：架构图 + 结果图**
+   - 每篇精读论文最多展示两张：
+     - `architecture_img`：模型架构 / 方法流程 / overview / pipeline
+     - `benchmark_img`：主结果表、benchmark 对比、performance/comparison 图
+   - 过滤无关图：定性样例拼贴、作者照片、数据样例、装饰性插图、零散子图。
+
+3. **优先裁完整 Figure/Table block，而不是只抽 embedded image**
+   - 许多论文中的“架构图”实际上是**整块 figure 区域**，包含：箭头、文字、公式、子图布局。
+   - `pdfimages` 只能抽底图，往往会丢失关键标注，因此不应作为最终展示图的唯一来源。
+   - 正确做法：根据 `Figure N` / `Fig. N` / `Table N` caption 的位置，从 PDF 页面裁出**完整 figure/table 区域**。
+
+4. **推荐选择策略**
+   - 架构图优先级：
+     - `Figure 1`
+     - 若 `Figure 1` 不是方法图，则选择 caption 含 `architecture / framework / overview / pipeline / method / training pipeline` 的 figure
+   - 结果图优先级：
+     - `Table 1`
+     - 若 `Table 1` 不是主结果，则选择 caption 含 `benchmark / comparison / evaluation / results / performance` 的 table 或 figure
+
+5. **裁剪启发式**
+   - 对 figure：截取 caption 上方对应的整块视觉区域，并保留 caption
+   - 对 table：从 caption 开始向下裁到下一张 `Figure/Table` caption 之前
+   - 若同页存在多个 figure/table，必须用“当前 caption 到下一 caption”的边界裁切，避免把相邻内容混进来
+
+6. **保存位置建议**
+   - 报告相关图片统一保存到：
+     - `papers/{date}/assets/selected/{arxiv_id}-arch.png`
+     - `papers/{date}/assets/selected/{arxiv_id}-result.png`
+   - 在 Markdown 中用相对路径直接嵌入：
+     - `![...](assets/selected/{arxiv_id}-arch.png)`
+     - `![...](assets/selected/{arxiv_id}-result.png)`
+
+7. **与 reviewer skill 的关系**
+   - `paper-read-reviewer` 里的 `visuals` 字段可以为空或保留 URL 占位；
+   - **最终报告阶段**由主 agent 结合本地 PDF 再做一次“图像筛选 + 裁剪 + 嵌入”，这是更稳妥的做法。
+
 ---
 
-## Step 7：清理 PDF 和临时结果
+## Step 7：清理缓存
 
 ```bash
+# 仅清理 /tmp 下的中间过程文件和 PDF
 python ~/.claude/skills/paper-read/scripts/cleanup.py --pdf-dir /tmp/arxiv-papers
 rm -rf /tmp/arxiv_results/
+rm /tmp/arxiv_all.json /tmp/arxiv_topn.json /tmp/arxiv_screening.json /tmp/arxiv_selected.json
 ```
+
+> [!TIP]
+> 经过此步后，`/tmp` 将被清空，但 `papers/{date}/` 中的报告和核心 JSON 将被永久保留。
 
 ---
 
