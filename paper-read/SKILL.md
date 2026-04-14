@@ -16,7 +16,7 @@ description: 自动爬取 arXiv cs.CV 当天所有新论文，两阶段筛选：
          ↓
 主 Agent：每批并行启动 5 个 Task subagent（agent=5）
     └─ subagent × 5（每篇独立 200k 上下文）：
-         读 PDF 全文 → 深度分析 → OpenJudge 五阶段 → 写 /tmp/arxiv_results/{id}.json
+         读 PDF 全文 → 深度分析 → OpenJudge 五阶段 → 写 tmp/arxiv_results/{id}.json
          ↓（等待本批 5 个全部完成）
 主 Agent：收集所有结果 JSON → 综合打分排序 → 生成 Markdown 报告 → 清理
 ```
@@ -32,30 +32,54 @@ description: 自动爬取 arXiv cs.CV 当天所有新论文，两阶段筛选：
 
 ```
 任务进度：
-- [ ] Step 0：[前置检查] 查询最近 7 天是否有过精读，如有则跳过
+- [ ] Step 0：[前置检查] 构建最近 7 天已处理 arXiv ID 集合，并校验 today/recent 是否真的出现新批次
 - [ ] Step 1：安装依赖与创建 papers/{date} 目录
-- [ ] Step 2：爬取当天全量论文元数据（含摘要）
-- [ ] Step 3：[阶段 1] Agent 读全量摘要，初筛出 Top N
-- [ ] Step 4：下载 Top N 论文的 PDF
-- [ ] Step 5：[阶段 2] 批量并行启动 Task subagent 精读（agent=5，每批 5 篇并行）
+- [ ] Step 2：爬取 recent 全量元数据（含摘要）
+- [ ] Step 3：[增量过滤] 仅保留“本次新增论文”
+- [ ] Step 4：[阶段 1] Agent 读新增论文摘要，初筛出 Top N
+- [ ] Step 5：下载 Top N 论文的 PDF
+- [ ] Step 6：[阶段 2] 批量并行启动 Task subagent 精读（agent=5，每批 5 篇并行）
              └─ 每个 subagent：读 PDF 全文 → 深度分析 → OpenJudge 五阶段 → 写结果 JSON
-- [ ] Step 6：主 agent 收集全部结果，生成 Markdown 报告并保存至 papers/{date}/
-- [ ] Step 7：清理 /tmp 缓存文件（保留 papers/{date} 结果）
+- [ ] Step 7：主 agent 收集全部结果，生成 Markdown 报告并保存至 papers/{date}/
+- [ ] Step 8：清理 /tmp 缓存文件（保留 papers/{date} 结果）
 ```
 
 > **Token 预算说明**：精读 + 审稿是重度 token 任务（单篇 PDF 可达 15-30k tokens），绝不在主 agent 内循环处理所有论文。每篇论文独立分配一个 Task subagent，在 200k 上下文内完整处理完再结束，避免主 agent 耗尽上下文。
 
 ---
 
-## Step 0：前置检查 — 最近一周精读校验
+## Step 0：前置检查 — 新批次校验 + 近 7 天去重集合
 
-在开始任何操作前，主 Agent 必须检查本地 `papers/` 目录：
+在开始任何操作前，主 Agent 必须检查本地 `papers/` 目录，但**不再因为近 7 天做过日报就直接跳过**。正确做法是：
+
 1. **获取日期**：确定当前日期（YYYY-MM-DD）。
-2. **扫描目录**：列出 `papers/` 下所有以日期命名的子目录。
-3. **校验逻辑**：如果有任何目录的日期与当前日期的差距 **≤ 7 天**，则认为最近已完成过精读。
-4. **决策**：
-   - 若发现最近 7 天内有过精读：向用户报告"最近 7 天内已于 {found_date} 完成过论文精读，本次将跳过"，并**中止任务**。
-   - 若没有发现：继续执行后续步骤。
+2. **扫描目录**：列出 `papers/` 下所有以日期命名的子目录，并读取最近 7 天内的：
+   - `arxiv_selected.json`
+   - `arxiv_screening.json`
+   - 若存在旧版 `arxiv_topn.json` 也一并读取
+3. **构建已处理 ID 集合**：把最近 7 天内已进入“精读”或已下载 PDF 的 `arxiv_id` 汇总成 `processed_ids`。
+4. **目的**：后续所有筛选必须以“增量”为单位，避免把 arXiv `recent` 页上同一批论文重复写成多天日报。
+
+### Step 0.1：recent 页是否真的出现新批次
+
+`recent` 页不等于“今天新增”。主 Agent 必须额外检查：
+
+1. 从 `recent` 抓到的论文中，优先读取列表页对应的 **showing_date**（即 arXiv recent 页面展示批次日期）；
+2. 同时保留每篇论文详情页里的 `Submitted on ...` 作为 `submission_date` 参考信息；
+3. 批次判断时**优先依据 `showing_date`**，仅当缺失时才回退到 `submission_date`；
+4. 判断当前 `recent` 是否仍然只是前一天/前几天的同一展示批次。
+
+### 决策规则
+
+- 若 `recent` 页中的论文展示批次日期（`showing_date`）并未进入新一天，且相对 `processed_ids` **没有任何新增论文**：
+  - 明确向用户报告：
+    - `当前 cs.CV recent 仍是旧批次，今天没有新增论文，不应重复生成日报。`
+  - **停止任务，不生成重复报告。**
+- 若 `recent` 页仍是旧批次，但相对 `processed_ids` 仍存在**未处理的新论文**：
+  - 继续执行，但必须以“**增量补充**”模式进行；
+  - 报告中明确注明：`这不是新的 arXiv 日更批次，而是对上一批中尚未处理论文的增量补读。`
+- 若确实出现新的展示批次（优先 `showing_date`）：
+  - 正常继续后续步骤。
 
 ---
 
@@ -74,22 +98,79 @@ mkdir -p papers/$(date +%Y-%m-%d)
 
 ---
 
-## Step 2：爬取全量元数据
+## Step 2：爬取 recent 全量元数据
 
 ```bash
-python ~/.claude/skills/paper-read/scripts/crawl_and_extract.py \
+python3 scripts/paper-read/crawl_and_extract.py \
   --category cs.CV \
-  --output /tmp/arxiv_all.json \
+  --output tmp/arxiv_all.json \
   --mode meta-only
 ```
 
-输出：**全部当天论文**的元数据 JSON（标题 + 摘要 + arXiv ID，无 PDF）。
+输出：`recent` 页上的全量元数据 JSON（标题 + 摘要 + arXiv ID + `showing_date` + `submission_date`，无 PDF）。
+
+> 注意：这里拿到的是 `recent` 全量，不保证等于“今天新发”。必须经过下一步增量过滤。
+>
+> 路径约定统一使用**相对路径**：`tmp/`、`papers/`、`scripts/`，不要写死绝对路径。
 
 ---
 
-## Step 3：阶段 1 — Agent 摘要初筛
+## Step 3：增量过滤 — 只保留本次真正新增论文
 
-读取 `/tmp/arxiv_all.json`，**不下载任何 PDF**，仅根据标题和摘要快速评分。
+主 Agent 必须读取 `tmp/arxiv_all.json`，结合 Step 0 得到的 `processed_ids` 做去重。
+
+推荐直接调用增量过滤脚本：
+
+```bash
+python3 scripts/paper-read/filter_incremental.py \
+  --all-meta tmp/arxiv_all.json \
+  --papers-dir papers \
+  --lookback-days 7 \
+  --output tmp/arxiv_incremental.json \
+  --processed-output tmp/arxiv_processed_ids.json \
+  --new-batch-output tmp/arxiv_latest_batch.json \
+  --strict-new-batch
+```
+
+该脚本会：
+- 扫描 `papers/` 下最近 7 天目录；
+- 自动汇总 `arxiv_selected.json` / `arxiv_screening.json` / `arxiv_topn.json` 中的历史 ID；
+- 自动识别 `recent` 中最新批次日期：**优先 `showing_date`，其次 `submission_date`**；
+- 输出严格增量后的 `tmp/arxiv_incremental.json`。
+
+### 过滤规则
+
+保留同时满足以下条件的论文：
+1. `arxiv_id` **不在** `processed_ids` 中；
+2. 若本次目标是“今日新批次”，则其 `showing_date` 必须属于当前新批次；若缺失才回退到 `submission_date`；
+3. 若当前并无新批次，但用户仍要求继续，则仅允许保留“旧批次里尚未处理的增量论文”。
+
+### 必须写出的文件
+
+`tmp/arxiv_incremental.json`：
+```json
+[
+  {
+    "arxiv_id": "2604.07350",
+    "title": "...",
+    "abstract": "...",
+    "showing_date": "2026-04-09",
+    "submission_date": "2026-04-08"
+  }
+]
+```
+
+### 零增量处理
+
+如果过滤后论文数为 0：
+- 直接向用户报告：`当前 recent 没有新增论文（或近 7 天内均已处理），本次不生成重复日报。`
+- **中止任务**。
+
+---
+
+## Step 4：阶段 1 — Agent 摘要初筛
+
+读取 `tmp/arxiv_incremental.json`，**不下载任何 PDF**，仅根据标题和摘要快速评分。
 
 ### 初筛评分矩阵（每篇独立打分，满分 6 分，≥4 分入选精读）
 
@@ -142,12 +223,12 @@ python ~/.claude/skills/paper-read/scripts/crawl_and_extract.py \
 
 将初筛结果写入两个文件：
 
-`/tmp/arxiv_topn.json`（精读 ID 列表）：
+`tmp/arxiv_topn.json`（精读 ID 列表）：
 ```json
 ["2503.12345", "2503.67890"]
 ```
 
-`/tmp/arxiv_screening.json`（含评分明细，供报告使用）：
+`tmp/arxiv_screening.json`（含评分明细，供报告使用）：
 ```json
 [
   {
@@ -161,27 +242,38 @@ python ~/.claude/skills/paper-read/scripts/crawl_and_extract.py \
 ]
 ```
 
+### 强制约束（新增）
+
+- **禁止**把最近 7 天内已经进入 `arxiv_selected.json` 的论文再次纳入 `tmp/arxiv_topn.json`
+- **禁止**把 `recent` 页上同一展示批次（优先 `showing_date`）的旧论文反复当成“今日论文”输出
+- 若用户要求“重新跑今天论文”，默认含义是：
+  - **先判断是否有新批次**；
+  - 若无新批次，则只允许输出“增量未处理论文”或明确告知“今天没有新增”
+- 若确需重跑旧批次，报告标题和正文必须明确写成：
+  - `增量补读` / `补充筛选`
+  - 不能伪装成新的 `today report`
+
 ---
 
-## Step 4：下载 Top N 的 PDF
+## Step 5：下载 Top N 的 PDF
 
 ```bash
-python ~/.claude/skills/paper-read/scripts/crawl_and_extract.py \
+python3 scripts/paper-read/crawl_and_extract.py \
   --category cs.CV \
-  --output /tmp/arxiv_selected.json \
-  --pdf-dir /tmp/arxiv-papers \
+  --output tmp/arxiv_selected.json \
+  --pdf-dir tmp/arxiv-papers \
   --mode download \
-  --ids-file /tmp/arxiv_topn.json \
-  --all-meta /tmp/arxiv_all.json
+  --ids-file tmp/arxiv_topn.json \
+  --all-meta tmp/arxiv_all.json
 ```
 
-> `--ids-file` 来自 Step 3 写出的 `/tmp/arxiv_topn.json`（总分 ≥ 4 的 arxiv_id 列表）。
+> `--ids-file` 来自 Step 4 写出的 `tmp/arxiv_topn.json`（总分 ≥ 4 的 arxiv_id 列表）。
 
 只下载初筛选出的论文 PDF，其余不下载。
 
 ---
 
-## Step 5：阶段 2 — Task Subagent 逐篇精读 + OpenJudge 审稿
+## Step 6：阶段 2 — Task Subagent 逐篇精读 + OpenJudge 审稿
 
 > **依赖**：本步需要独立 skill `paper-read-reviewer`，路径 `~/.claude/skills/paper-read-reviewer/SKILL.md`。若不存在，须先安装/复制该 skill，否则无法注入 subagent prompt。
 
@@ -193,17 +285,17 @@ python ~/.claude/skills/paper-read/scripts/crawl_and_extract.py \
 - 每个 subagent 独占完整 200k 上下文，互不干扰
 - 每个 subagent 的 prompt **必须**从 `~/.claude/skills/paper-read-reviewer/SKILL.md` 的 `## Prompt 模板` 节提取（见下方「Subagent Prompt 注入方式」），包含论文元数据占位符 + 完整分析框架 + OpenJudge 五阶段指令
 - prompt 原文不可精简、不可省略，须完整注入 subagent
-- subagent 完成后将结果写入 `/tmp/arxiv_results/{arxiv_id}.json`
+- subagent 完成后将结果写入 `tmp/arxiv_results/{arxiv_id}.json`
 
 ### 主 agent 的操作流程
 
-读取 `/tmp/arxiv_selected.json` 获取精读列表，**按批次**执行：
+读取 `tmp/arxiv_selected.json` 获取精读列表，**按批次**执行：
 
 ```
 将所有待精读论文分组，每组 5 篇（最后一批不足 5 篇则取实际数量）
 
 for each batch of 5 papers:
-    1. 过滤：跳过 /tmp/arxiv_results/{arxiv_id}.json 已存在的论文（断点续传）
+    1. 过滤：跳过 tmp/arxiv_results/{arxiv_id}.json 已存在的论文（断点续传）
     2. 对本批剩余论文，同时启动 5 个 Task subagent（并行）
     3. 等待本批所有 subagent 全部完成
     4. 逐一读取结果文件，确认写入成功
@@ -237,14 +329,14 @@ for each batch of 5 papers:
 
 ---
 
-## Step 6：主 Agent 汇总报告
+## Step 7：主 Agent 汇总报告
 
-> **执行时机**：等待所有 subagent 完成（`/tmp/arxiv_results/` 下的 JSON 数量 = 精读论文数）后，由**主 agent** 执行本步骤。读取全部 `{arxiv_id}.json`，汇总评分、排序、生成最终 Markdown 报告。
+> **执行时机**：等待所有 subagent 完成（`tmp/arxiv_results/` 下的 JSON 数量 = 精读论文数）后，由**主 agent** 执行本步骤。读取全部 `{arxiv_id}.json`，汇总评分、排序、生成最终 Markdown 报告。
 
 ### 存储路径
 - **Markdown 报告**: `papers/{date}/arxiv-{category}-{date}-report.md`
-- **结果 JSON**: 将 `/tmp/arxiv_results/` 下的所有文件复制或移动到 `papers/{date}/results/`
-- **元数据**: 复制 `/tmp/arxiv_screening.json` 和 `/tmp/arxiv_selected.json` 到 `papers/{date}/`
+- **结果 JSON**: 将 `tmp/arxiv_results/` 下的所有文件复制或移动到 `papers/{date}/results/`
+- **元数据**: 复制 `tmp/arxiv_screening.json`、`tmp/arxiv_selected.json`、`tmp/arxiv_incremental.json` 到 `papers/{date}/`
 
 ### 最终综合评分逻辑
 
@@ -398,17 +490,17 @@ OpenJudge 五阶段输出综合为最终评级：
 
 ---
 
-## Step 7：清理缓存
+## Step 8：清理缓存
 
 ```bash
-# 仅清理 /tmp 下的中间过程文件和 PDF
-python ~/.claude/skills/paper-read/scripts/cleanup.py --pdf-dir /tmp/arxiv-papers
-rm -rf /tmp/arxiv_results/
-rm /tmp/arxiv_all.json /tmp/arxiv_topn.json /tmp/arxiv_screening.json /tmp/arxiv_selected.json
+# 仅清理 tmp/ 下的中间过程文件和 PDF
+python3 scripts/paper-read/cleanup.py --pdf-dir tmp/arxiv-papers
+rm -rf tmp/arxiv_results/
+rm -f tmp/arxiv_all.json tmp/arxiv_topn.json tmp/arxiv_screening.json tmp/arxiv_selected.json tmp/arxiv_incremental.json tmp/arxiv_processed_ids.json tmp/arxiv_latest_batch.json
 ```
 
 > [!TIP]
-> 经过此步后，`/tmp` 将被清空，但 `papers/{date}/` 中的报告和核心 JSON 将被永久保留。
+> 经过此步后，`tmp/` 将被清空，但 `papers/{date}/` 中的报告和核心 JSON 将被永久保留。
 
 ---
 
@@ -420,5 +512,5 @@ rm /tmp/arxiv_all.json /tmp/arxiv_topn.json /tmp/arxiv_screening.json /tmp/arxiv
 | `--mode` | `meta-only` | `meta-only`=只爬元数据；`download`=下载指定 PDF |
 | `--ids-file` | 无 | download 模式：指定要下载的 arxiv_id 列表文件 |
 | `--all-meta` | 无 | download 模式：全量元数据文件路径 |
-| `--pdf-dir` | `/tmp/arxiv-papers` | PDF 临时目录 |
+| `--pdf-dir` | `tmp/arxiv-papers` | PDF 临时目录 |
 | `--delay` | `1.5` | 下载间隔秒（避免 arXiv 限流） |
