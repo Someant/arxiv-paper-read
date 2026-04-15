@@ -98,7 +98,7 @@ mkdir -p papers/$(date +%Y-%m-%d)
 
 ---
 
-## Step 2：爬取 recent 全量元数据
+## Step 2：爬取 `/new` 全量元数据
 
 ```bash
 python3 scripts/paper-read/crawl_and_extract.py \
@@ -107,9 +107,12 @@ python3 scripts/paper-read/crawl_and_extract.py \
   --mode meta-only
 ```
 
-输出：`recent` 页上的全量元数据 JSON（标题 + 摘要 + arXiv ID + `showing_date` + `submission_date`，无 PDF）。
+输出：`/new` 页上的全量元数据 JSON（标题 + 摘要 + arXiv ID + `section` + `showing_date` + `submission_date`，无 PDF）。
 
-> 注意：这里拿到的是 `recent` 全量，不保证等于“今天新发”。必须经过下一步增量过滤。
+> 新版脚本默认请求 `https://arxiv.org/list/{category}/new`，并在列表页直接提取摘要，同时标注：
+> - `section = new`
+> - `section = cross_list`
+> - `section = replacement`
 >
 > 路径约定统一使用**相对路径**：`tmp/`、`papers/`、`scripts/`，不要写死绝对路径。
 
@@ -135,15 +138,17 @@ python3 scripts/paper-read/filter_incremental.py \
 该脚本会：
 - 扫描 `papers/` 下最近 7 天目录；
 - 自动汇总 `arxiv_selected.json` / `arxiv_screening.json` / `arxiv_topn.json` 中的历史 ID；
-- 自动识别 `recent` 中最新批次日期：**优先 `showing_date`，其次 `submission_date`**；
+- 自动识别 `/new` 中最新批次日期：**优先 `showing_date`，其次 `submission_date`**；
+- 默认仅保留 `section=new` 的论文，自动排除 `cross_list` 与 `replacement`；
 - 输出严格增量后的 `tmp/arxiv_incremental.json`。
 
 ### 过滤规则
 
 保留同时满足以下条件的论文：
 1. `arxiv_id` **不在** `processed_ids` 中；
-2. 若本次目标是“今日新批次”，则其 `showing_date` 必须属于当前新批次；若缺失才回退到 `submission_date`；
-3. 若当前并无新批次，但用户仍要求继续，则仅允许保留“旧批次里尚未处理的增量论文”。
+2. 默认 `section == new`；`cross_list` / `replacement` 不进入“今日主批次”筛选池，除非用户明确要求放开；
+3. 若本次目标是“今日新批次”，则其 `showing_date` 必须属于当前新批次；若缺失才回退到 `submission_date`；
+4. 若当前并无新批次，但用户仍要求继续，则仅允许保留“旧批次里尚未处理的增量论文”。
 
 ### 必须写出的文件
 
@@ -163,7 +168,7 @@ python3 scripts/paper-read/filter_incremental.py \
 ### 零增量处理
 
 如果过滤后论文数为 0：
-- 直接向用户报告：`当前 recent 没有新增论文（或近 7 天内均已处理），本次不生成重复日报。`
+- 直接向用户报告：`当前 /new 主批次没有新增论文（或近 7 天内均已处理），本次不生成重复日报。`
 - **中止任务**。
 
 ---
@@ -199,12 +204,14 @@ python3 scripts/paper-read/filter_incremental.py \
 | 1 | 摘要中明确提到与 SOTA 对比，且有具体数字（如"surpasses X by Y%"、"achieves state-of-the-art on Z"） |
 | 0 | 无具体数字，只说"competitive"或"promising" |
 
-#### D. 机构/作者信号（0-1 分）
+#### D. 作者/机构背景信号（0-1 分，弱参考）
 
 | 分 | 判断依据 |
 |----|---------|
-| 1 | 来自顶级 AI 机构（Google DeepMind / OpenAI / Meta AI / Microsoft Research / 清华 / PKU / CMU / MIT / Stanford / ETH 等）或已知活跃研究组 |
-| 0 | 其他机构 |
+| 1 | 来自该方向公认活跃研究组、工业研究机构或长期稳定产出顶会论文的团队；**仅作弱参考，不得单独决定是否入选** |
+| 0 | 无明显额外信号 |
+
+> 不再使用固定机构白名单；若论文本身方法与实验较弱，不得因为机构强而抬高入选优先级。
 
 ### 入选规则
 
@@ -212,12 +219,26 @@ python3 scripts/paper-read/filter_incremental.py \
 - **总分 2-3**：记录在报告"摘要快览"表中，不精读
 - **总分 ≤ 1**：直接跳过，不记录
 
-### 快速排除规则（直接 0 分跳过，无需打分）
+### 快速排除规则（默认直接 0 分跳过，但需先判断是否为“纯数据/综述类”）
 
-满足以下任一条件直接排除：
-- 标题/摘要含 `survey` / `review` / `dataset` / `benchmark` / `we collect`
+满足以下任一条件时，可直接排除：
+- **纯** Survey / Review：主要贡献是整理文献、分类总结、趋势回顾，而非提出新方法/新训练范式/新推理框架
+- **纯** Dataset / Benchmark / Data Collection：主要贡献是收集数据、构建基准或设计评测协议，而非提出可复用的方法创新
 - 纯医疗影像论文（无通用方法贡献）
 - arXiv 分类仅含 `eess.IV` 或 `cs.NE`（主分类非 cs.CV）
+
+### 重要例外（禁止误杀）
+
+即使标题/摘要中出现 `dataset` / `benchmark` / `we collect` / `we construct` / `we curate`，**只要同时满足以下任一条件，就不得直接快速排除，必须进入正常打分**：
+- 明确提出了新方法/新框架/新训练策略/新推理策略（如 `we propose` / `we present a model` / `we design` / `framework` / `loss` / `module` / `strategy`）
+- 数据集/benchmark 只是支持性贡献，论文主体仍是方法创新
+- 论文同时解决一个清晰的新问题设定，并给出完整的方法闭环（问题定义 + 方法设计 + 实验验证）
+
+### 启发式判断原则
+
+- 若论文的“数据/benchmark”贡献只是为了验证一个新方法，**不要**因为出现关键词就直接排除
+- 若论文读起来更像“提出一种方法，并顺带构建数据/评测”，则按方法论文处理
+- 只有当论文读起来主要是在“搭数据集 / 搭 benchmark / 做综述”，而不是“提方法”，才使用快速排除
 
 ### 输出格式
 
@@ -235,7 +256,7 @@ python3 scripts/paper-read/filter_incremental.py \
     "arxiv_id": "2503.12345",
     "title": "...",
     "total_score": 5,
-    "scores": { "novelty": 2, "importance": 2, "experiment": 1, "institution": 0 },
+    "scores": { "novelty": 2, "importance": 2, "experiment": 1, "background": 0 },
     "reason": "一句话说明入选/排除原因",
     "tier": "精读"
   }
@@ -245,7 +266,7 @@ python3 scripts/paper-read/filter_incremental.py \
 ### 强制约束（新增）
 
 - **禁止**把最近 7 天内已经进入 `arxiv_selected.json` 的论文再次纳入 `tmp/arxiv_topn.json`
-- **禁止**把 `recent` 页上同一展示批次（优先 `showing_date`）的旧论文反复当成“今日论文”输出
+- **禁止**把同一展示批次（优先 `showing_date`）的旧论文反复当成“今日论文”输出
 - 若用户要求“重新跑今天论文”，默认含义是：
   - **先判断是否有新批次**；
   - 若无新批次，则只允许输出“增量未处理论文”或明确告知“今天没有新增”
@@ -281,7 +302,8 @@ python3 scripts/paper-read/crawl_and_extract.py \
 
 ### 执行规则
 
-- **agent=5**：每批同时并行启动 **5 个** subagent，等待本批全部完成（结果均已写盘）后再启动下一批
+- **动态 batch 调度必须先落盘再执行**：主 agent 不应临场拍脑袋决定并行度，必须先运行 `scripts/paper-read/plan_batches.py` 生成 `tmp/arxiv_batches.json`
+- 批次规则默认如下：短论文 `batch_size=5`，中等论文 `batch_size=3`，超长论文 `batch_size=2`
 - 每个 subagent 独占完整 200k 上下文，互不干扰
 - 每个 subagent 的 prompt **必须**从 `~/.claude/skills/paper-read-reviewer/SKILL.md` 的 `## Prompt 模板` 节提取（见下方「Subagent Prompt 注入方式」），包含论文元数据占位符 + 完整分析框架 + OpenJudge 五阶段指令
 - prompt 原文不可精简、不可省略，须完整注入 subagent
@@ -289,18 +311,42 @@ python3 scripts/paper-read/crawl_and_extract.py \
 
 ### 主 agent 的操作流程
 
-读取 `tmp/arxiv_selected.json` 获取精读列表，**按批次**执行：
+读取 `tmp/arxiv_selected.json` 获取精读列表后，**必须先生成批次计划**：
+
+```bash
+python3 scripts/paper-read/plan_batches.py \
+  --selected tmp/arxiv_selected.json \
+  --output tmp/arxiv_batches.json
+```
+
+`tmp/arxiv_batches.json` 会为每篇论文补充：
+- `pdf_size_mb`
+- `pdf_pages`
+- `size_tier`（small / medium / large）
+- `recommended_batch_size`
+- `estimated_token_cost`
+
+并输出按 tier 切分后的批次列表，供主 agent 逐批执行。
+
+执行顺序：默认 `large -> medium -> small`，避免长论文拖到最后形成不可预测尾延迟。
 
 ```
-将所有待精读论文分组，每组 5 篇（最后一批不足 5 篇则取实际数量）
+读取 tmp/arxiv_batches.json
 
-for each batch of 5 papers:
+for each batch in batches:
     1. 过滤：跳过 tmp/arxiv_results/{arxiv_id}.json 已存在的论文（断点续传）
-    2. 对本批剩余论文，同时启动 5 个 Task subagent（并行）
+    2. 对本批剩余论文，同时启动 batch.batch_size 个 Task subagent（并行）
     3. 等待本批所有 subagent 全部完成
     4. 逐一读取结果文件，确认写入成功
     5. 处理下一批
 ```
+
+### `plan_batches.py` 的默认分档规则
+
+- `small`：`pdf_pages < 12` 且 `pdf_size_mb < 2.0` → `batch_size = 5`
+- `medium`：`pdf_pages <= 25` 且 `pdf_size_mb <= 6.0` → `batch_size = 3`
+- `large`：其余情况 → `batch_size = 2`
+- 若页数不可得，则回退到 PDF 大小判断；若大小也不可得，则保守归为 `medium`
 
 ### Subagent Prompt 注入方式
 
@@ -336,7 +382,32 @@ for each batch of 5 papers:
 ### 存储路径
 - **Markdown 报告**: `papers/{date}/arxiv-{category}-{date}-report.md`
 - **结果 JSON**: 将 `tmp/arxiv_results/` 下的所有文件复制或移动到 `papers/{date}/results/`
-- **元数据**: 复制 `tmp/arxiv_screening.json`、`tmp/arxiv_selected.json`、`tmp/arxiv_incremental.json` 到 `papers/{date}/`
+- **元数据**: 复制 `tmp/arxiv_screening.json`、`tmp/arxiv_selected.json`、`tmp/arxiv_incremental.json`、`tmp/arxiv_batches.json` 到 `papers/{date}/`
+
+### 推荐渲染方式（优先）
+
+优先使用统一渲染脚本生成 Markdown，避免主 agent 手写字符串导致字段漂移：
+
+```bash
+python3 scripts/paper-read/render_report.py \
+  --date $(date +%Y-%m-%d) \
+  --category cs.CV \
+  --incremental tmp/arxiv_incremental.json \
+  --screening tmp/arxiv_screening.json \
+  --selected tmp/arxiv_selected.json \
+  --batches tmp/arxiv_batches.json \
+  --results-dir tmp/arxiv_results \
+  --style human \
+  --daily-conclusion-file tmp/daily_conclusion.md \
+  --output papers/$(date +%Y-%m-%d)/arxiv-cs.CV-$(date +%Y-%m-%d)-report.md
+```
+
+其中：
+- `--style human`：**默认推荐**，生成更适合人读的日报风格；会优先输出统一的 `## 今日关注` 段落，先给总判断，再按主题展开，并在该部分把重点论文写成 `简称 [arxiv_id](link) · score` 的格式。
+- `--style template`：保留完整字段化模板，更适合调试、验收和结构化检查；同样使用统一的 `## 今日关注` 段落，而不是把“今日结论”和“今天值得关注什么”拆成两个重复 section。
+- `tmp/daily_conclusion.md` 为可选输入；若存在，渲染脚本会将其作为 `## 今日关注` 中的补充说明插入，而不是单独再生成一个重复总结段。
+
+若使用脚本失败，主 agent 才可回退到手工拼接 Markdown，但必须遵守下文的字段对齐规则。
 
 ### 最终综合评分逻辑
 
@@ -350,23 +421,87 @@ OpenJudge 五阶段输出综合为最终评级：
 | major_issues 数量 ≥ 2 | review_score 下调 1 分（最多叠加一次） |
 | bib `error` 比例 > 20% | 报告标注 ⚠️ 引用存在确认性错误 |
 | bib `unverifiable` 比例高 | **不影响评分**，仅在报告注明"PDF提取质量影响参考文献分析" |
+| `bibcheck.executed = false` | **不影响评分**，报告注明跳过原因 |
 
 最终分 = review_score（含以上调整，最低 1 分）
 
 > **注意**：`unverifiable` 条目纯粹反映 PDF 提取质量，不得计入引用质量判断，不影响任何评分。
 
+### 报告生成字段对齐规则
+
+主 agent 在生成最终报告前，必须逐篇读取 reviewer JSON，并按以下字段映射统一取值：
+
+| 报告字段 | reviewer JSON 来源 |
+|---|---|
+| 标题 | `title` |
+| 原文链接 | `abs_url` |
+| 核心贡献 | `analysis.core_contribution` |
+| 实验指标 | `analysis.experiments` |
+| 消融实验 | `analysis.ablation` |
+| 越狱检测 | `openjudge.safety.jailbreak` |
+| 格式违规 | `openjudge.safety.format_violations` + `violations_list` |
+| 正确性评分 | `openjudge.correctness.score` + `reasoning` + `key_issues` |
+| 学术评审 | `openjudge.review.score` + `level` + `strengths` + `weaknesses` + `questions` |
+| 严重性验证 | `openjudge.criticality.major_issues` / `minor_issues` / `false_positives` |
+| 参考文献校验 | `openjudge.bibcheck.*` |
+| 最终分 | `final_score` |
+| 调整说明 | `score_adjustments` |
+| 图片线索 | `visual_hints.*` |
+| 图片占位 | `visuals.*` |
+
+### 缺失字段与降级规则
+
+- 若 `visuals.architecture_img` 或 `visuals.benchmark_img` 为空：
+  - 主 agent 先尝试依据 `visual_hints` + 本地 PDF 裁图；
+  - 若仍失败，则在报告中写 `未提取到合适图片`，不得留空 broken link。
+- 若 `openjudge.bibcheck.executed = false`：
+  - 报告中显示 `参考文献校验：已跳过（原因：...）`；
+  - 不得伪造 0 条检查结果冒充“已完成检查”。
+- 若 `score_adjustments` 为空数组：
+  - 报告中写 `无额外调整`。
+- 若 `questions` / `major_issues` / `minor_issues` / `false_positives` 为空：
+  - 报告中写 `无`，保持结构稳定。
+- 若单篇 reviewer JSON 缺关键字段：
+  - 主 agent 必须在汇总时显式标记 `字段缺失`，并继续处理其他论文，避免整份报告失败。
+
+### 批次统计字段对齐
+
+生成报告统计概览时，除论文内容外，还必须从 `tmp/arxiv_batches.json` 读取：
+- `summary.total_papers`
+- `summary.batch_count`
+- `summary.tier_counts.small`
+- `summary.tier_counts.medium`
+- `summary.tier_counts.large`
+- `summary.missing_pdf_count`
+
+并在统计概览中展示动态调度情况，便于回溯执行成本。
+
 ### 报告模板
+
+> 实际执行时，**优先生成 `--style human` 的版本** 作为最终面向用户的日报；以下模板主要描述 `template` 风格下的字段对齐要求。若需要更像人写的报告，正文应优先采用“`今日关注`（总判断 + 主线展开） / 为什么值得看 / 一句话结论 / 实验亮点 / 我会怎么评价它”的顺序，而不是在正文里直接堆叠全部 OpenJudge 字段。
 
 ```markdown
 # arXiv {category} 论文解读 — {YYYY-MM-DD}
+
+## 今日关注
+
+先说结论：今天最值得关注的主线是……最值得优先读的论文是……
+
+具体看：
+- 主线 A：...
+- 主线 B：...
 
 ## 统计概览
 
 | 指标 | 数值 |
 |------|------|
-| 当日总论文数 | XXX |
+| `/new` 主批次数量 | XXX |
+| 增量论文数 | XX |
 | 摘要初筛入选 | XX |
 | 全文精读数 | XX |
+| 动态批次数 | XX |
+| large / medium / small | X / X / X |
+| 缺失 PDF 数 | X |
 | 平均 OpenJudge 分 | X.X / 6 |
 | 安全异常论文数 | X |
 
@@ -378,15 +513,21 @@ OpenJudge 五阶段输出综合为最终评级：
 
 **原文链接**: [abs_url](abs_url)
 
-**作者**: ... | **分类**: ... | **机构**: ...
+**作者**: ... | **分类**: ... | **背景信号**: ...
+
+**调度信息**: `tier={size_tier}` | `pages={pdf_pages}` | `pdf={pdf_size_mb}MB` | `batch_size={recommended_batch_size}`
 
 **架构图（从 PDF 页面裁整块 Figure）**
 
 ![架构图]({architecture_img})
 
+> 若未裁图成功：写 `未提取到合适图片`；若仅有线索，可追加 `候选线索：{visual_hints.architecture_candidates}`
+
 **结果图 / Benchmark（从 PDF 页面裁整块 Figure/Table）**
 
 ![实验结果]({benchmark_img})
+
+> 若未裁图成功：写 `未提取到合适图片`；若仅有线索，可追加 `候选线索：{visual_hints.benchmark_candidates}`
 
 #### 核心贡献
 ...
@@ -423,24 +564,27 @@ OpenJudge 五阶段输出综合为最终评级：
 - 误报（已排除）：...
 
 **[阶段 5] 参考文献校验**
-- 检查：XX 条 | ✅ verified: XX | ⚠️ suspect: XX | ❓ unverifiable: XX（PDF提取质量） | ❌ error: XX
-- 可疑引用：...
-- 确认错误：...
+- 若 `bibcheck.executed = true`：
+  - 检查：XX 条 | ✅ verified: XX | ⚠️ suspect: XX | ❓ unverifiable: XX（PDF提取质量） | ❌ error: XX
+  - 可疑引用：...
+  - 确认错误：...
+- 若 `bibcheck.executed = false`：
+  - 参考文献校验：已跳过（原因：`skip_reason`）
 
-**最终综合评分：X/6**（调整说明：...）
+**最终综合评分：X/6**（调整说明：若 `score_adjustments` 为空则写 `无额外调整`）
 
 ---
 
 ## 摘要快览（总分 2-3 分，未精读）
 
-| # | arXiv ID | 标题 | 新颖 | 重要 | 实验 | 机构 | 总分 | 备注 |
+| # | arXiv ID | 标题 | 新颖 | 重要 | 实验 | 背景 | 总分 | 备注 |
 |---|----------|------|------|------|------|------|------|------|
 ...
 
 ## 全量汇总表
 
-| # | arXiv ID | 标题 | 阶段 | 最终分 |
-|---|----------|------|------|--------|
+| # | arXiv ID | 标题 | 阶段 | tier | pages | batch | 最终分 |
+|---|----------|------|------|------|-------|-------|--------|
 ...
 ```
 
@@ -485,8 +629,8 @@ OpenJudge 五阶段输出综合为最终评级：
      - `![...](assets/selected/{arxiv_id}-result.png)`
 
 7. **与 reviewer skill 的关系**
-   - `paper-read-reviewer` 里的 `visuals` 字段可以为空或保留 URL 占位；
-   - **最终报告阶段**由主 agent 结合本地 PDF 再做一次“图像筛选 + 裁剪 + 嵌入”，这是更稳妥的做法。
+   - `paper-read-reviewer` **不再负责访问 HTML、下载图片或裁图**；它只输出 `visual_hints`（如 Figure 1 / Table 1 / caption 关键词）或保留空的 `visuals` 占位；
+   - **最终报告阶段**统一由主 agent 结合本地 PDF 做“图像筛选 + 裁剪 + 嵌入”，这是唯一权威流程。
 
 ---
 
@@ -496,7 +640,7 @@ OpenJudge 五阶段输出综合为最终评级：
 # 仅清理 tmp/ 下的中间过程文件和 PDF
 python3 scripts/paper-read/cleanup.py --pdf-dir tmp/arxiv-papers
 rm -rf tmp/arxiv_results/
-rm -f tmp/arxiv_all.json tmp/arxiv_topn.json tmp/arxiv_screening.json tmp/arxiv_selected.json tmp/arxiv_incremental.json tmp/arxiv_processed_ids.json tmp/arxiv_latest_batch.json
+rm -f tmp/arxiv_all.json tmp/arxiv_topn.json tmp/arxiv_screening.json tmp/arxiv_selected.json tmp/arxiv_incremental.json tmp/arxiv_processed_ids.json tmp/arxiv_latest_batch.json tmp/arxiv_batches.json
 ```
 
 > [!TIP]
@@ -509,7 +653,7 @@ rm -f tmp/arxiv_all.json tmp/arxiv_topn.json tmp/arxiv_screening.json tmp/arxiv_
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--category` | `cs.CV` | arXiv 分类 |
-| `--mode` | `meta-only` | `meta-only`=只爬元数据；`download`=下载指定 PDF |
+| `--mode` | `meta-only` | `meta-only`=只爬 `/new` 元数据；`download`=下载指定 PDF |
 | `--ids-file` | 无 | download 模式：指定要下载的 arxiv_id 列表文件 |
 | `--all-meta` | 无 | download 模式：全量元数据文件路径 |
 | `--pdf-dir` | `tmp/arxiv-papers` | PDF 临时目录 |
