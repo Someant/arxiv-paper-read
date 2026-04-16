@@ -107,7 +107,7 @@ python3 scripts/paper-read/crawl_and_extract.py \
   --mode meta-only
 ```
 
-输出：`/new` 页上的全量元数据 JSON（标题 + 摘要 + arXiv ID + `section` + `showing_date` + `submission_date`，无 PDF）。
+输出：`/new` 页上的全量元数据 JSON（标题 + 摘要 + arXiv ID + `section` + `showing_date` + `submission_date` + `comments`，无 PDF）。
 
 > 新版脚本默认请求 `https://arxiv.org/list/{category}/new`，并在列表页直接提取摘要，同时标注：
 > - `section = new`
@@ -115,7 +115,19 @@ python3 scripts/paper-read/crawl_and_extract.py \
 > - `section = replacement`
 >
 > 路径约定统一使用**相对路径**：`tmp/`、`papers/`、`scripts/`，不要写死绝对路径。
-
+>
+> **新增事实标注要求**：阶段 1 与最终报告都必须尽量基于 arXiv 原文元数据补齐并展示：
+> - `comments` 字段
+> - 论文类型：`main_conference` / `workshop` / `preprint` / `tech_report`
+> - 任务领域、方法关键词、数据集、核心数字
+>
+> 其中“论文类型”默认根据 `comments` 做保守判断：
+> - comments 明确含 `CVPR/ICCV/ECCV/NeurIPS/ICLR/AAAI main conference / accepted / oral / spotlight` 等主会信号时，标为 `main_conference`
+> - comments 明确含 `workshop / challenge / competition / demo / extended abstract` 时，标为 `workshop`
+> - comments 仅描述 arXiv 版本、技术报告、submitted to、under review，或无明确信号时，标为 `preprint`
+> - comments 明确写 `technical report` 时，标为 `tech_report`
+>
+> 若 `comments` 缺失或歧义，必须明确写“按 preprint 暂定”，禁止擅自拔高为主会。
 ---
 
 ## Step 3：增量过滤 — 只保留本次真正新增论文
@@ -176,6 +188,20 @@ python3 scripts/paper-read/filter_incremental.py \
 ## Step 4：阶段 1 — Agent 摘要初筛
 
 读取 `tmp/arxiv_incremental.json`，**不下载任何 PDF**，仅根据标题和摘要快速评分。
+
+### 初筛前的必做标注（新增）
+
+主 Agent 在摘要初筛前，必须先对每篇增量论文补齐一份轻量事实卡，至少包含：
+- `arxiv_id`
+- 原文摘要（不得用二手转述摘要替代）
+- `comments`
+- 论文类型：主会 / Workshop / preprint / tech report
+- 任务领域
+- 方法关键词
+- 提及的数据集
+- 摘要中出现的核心数字（若无具体数字则显式写“摘要未给出硬数字”）
+
+> 这里的“核心数字”仅作为阶段 1 的快速线索；**任何进入最终报告正文的关键数字，都必须在后续原文全文中再次核实，并补充对应 setting**。
 
 ### 初筛评分矩阵（每篇独立打分，满分 6 分，≥4 分入选精读）
 
@@ -255,6 +281,14 @@ python3 scripts/paper-read/filter_incremental.py \
   {
     "arxiv_id": "2503.12345",
     "title": "...",
+    "paper_type": "preprint",
+    "comments": "...",
+    "facts": {
+      "task": ["..."] ,
+      "method_keywords": ["..."],
+      "datasets": ["..."],
+      "core_numbers": ["..."]
+    },
     "total_score": 5,
     "scores": { "novelty": 2, "importance": 2, "experiment": 1, "background": 0 },
     "reason": "一句话说明入选/排除原因",
@@ -263,6 +297,26 @@ python3 scripts/paper-read/filter_incremental.py \
 ]
 ```
 
+### 初筛结果标准化（强制执行）
+
+Agent 产出 `tmp/arxiv_screening.json` 后，主流程必须立刻运行：
+
+```bash
+python3 scripts/paper-read/normalize_screening.py \
+  --incremental tmp/arxiv_incremental.json \
+  --screening tmp/arxiv_screening.json \
+  --output tmp/arxiv_screening.json
+```
+
+该步骤会强制补齐：
+- `paper_type`
+- `comments`
+- `authors`
+- `subjects`
+- `showing_date` / `submission_date`
+- `facts.task` / `facts.method_keywords` / `facts.datasets` / `facts.core_numbers`
+
+若 Agent 漏写这些字段，不得直接进入下载与最终渲染步骤。
 ### 强制约束（新增）
 
 - **禁止**把最近 7 天内已经进入 `arxiv_selected.json` 的论文再次纳入 `tmp/arxiv_topn.json`
@@ -273,6 +327,9 @@ python3 scripts/paper-read/filter_incremental.py \
 - 若确需重跑旧批次，报告标题和正文必须明确写成：
   - `增量补读` / `补充筛选`
   - 不能伪装成新的 `today report`
+- **禁止**在未区分 `main_conference / workshop / preprint` 的情况下，对论文做等权推荐
+- **禁止**不经原文核验就在报告正文转述实验数字
+- **禁止**使用“最强 / 最稳 / 突破 / 首个”等绝对化措辞，除非后续给出同期竞争参照与依据
 
 ---
 
@@ -338,10 +395,69 @@ for each batch in batches:
     2. 对本批剩余论文，同时启动 batch.batch_size 个 Task subagent（并行）
     3. 等待本批所有 subagent 全部完成
     4. 逐一读取结果文件，确认写入成功
-    5. 处理下一批
+    5. 立刻运行 normalize_results.py 补齐 schema
+    6. 处理下一批
 ```
 
-### `plan_batches.py` 的默认分档规则
+每一批 subagent 完成后，主流程必须运行：
+
+```bash
+python3 scripts/paper-read/normalize_results.py \
+  --results-dir tmp/arxiv_results \
+  --selected tmp/arxiv_selected.json \
+  --screening tmp/arxiv_screening.json
+```
+
+该步骤会强制补齐 reviewer JSON 中的：
+- `paper_type`
+- `tags.task` / `tags.method_keywords` / `tags.datasets`
+- `analysis.checklist.*`
+- `openjudge.competition.*`
+- `visual_hints.*`
+- `visuals.*`
+
+若某篇 reviewer JSON 缺这些字段，必须先标准化再汇总，禁止把不完整 JSON 直接交给 `render_report.py`。
+
+### 渲染前硬校验（新增）
+
+`render_report.py` 现在会在启动时对 `tmp/arxiv_screening.json` 和 `tmp/arxiv_results/*.json` 做 schema 硬校验。
+
+若以下字段缺失，将**直接失败退出**，而不是静默兜底：
+- `arxiv_screening.json`：`paper_type`、`comments`、`facts.*`
+- reviewer JSON：`paper_type`、`tags.*`、`analysis.checklist.*`、`openjudge.competition.*`、`visual_hints.*`、`visuals.*`
+
+因此主流程顺序必须严格为：
+1. Agent 产出 `tmp/arxiv_screening.json`
+2. 运行 `normalize_screening.py`
+3. 下载 PDF / 启动 subagent
+4. 每批 subagent 完成后运行 `normalize_results.py`
+5. 最后才允许运行 `render_report.py`
+
+### 命令级闭环（推荐）
+
+为避免人工漏跑标准化步骤，优先直接使用总控脚本：
+
+```bash
+python3 scripts/paper-read/finalize_report.py \
+  --date $(date +%Y-%m-%d) \
+  --category cs.CV \
+  --incremental tmp/arxiv_incremental.json \
+  --screening tmp/arxiv_screening.json \
+  --selected tmp/arxiv_selected.json \
+  --batches tmp/arxiv_batches.json \
+  --results-dir tmp/arxiv_results \
+  --style human \
+  --output papers/$(date +%Y-%m-%d)/arxiv-cs.CV-$(date +%Y-%m-%d)-report.md \
+  --sync-dir papers/$(date +%Y-%m-%d)
+```
+
+该脚本会按固定顺序自动执行：
+1. `normalize_screening.py`
+2. `normalize_results.py`
+3. `render_report.py`
+4. 可选把 `incremental/screening/selected/batches/results/report` 同步归档到 `papers/{date}/`
+
+除非在调试单步脚本，否则推荐统一走 `finalize_report.py`，不要手工拼接最后几步。### `plan_batches.py` 的默认分档规则
 
 - `small`：`pdf_pages < 12` 且 `pdf_size_mb < 2.0` → `batch_size = 5`
 - `medium`：`pdf_pages <= 25` 且 `pdf_size_mb <= 6.0` → `batch_size = 3`
@@ -409,6 +525,37 @@ python3 scripts/paper-read/render_report.py \
 
 若使用脚本失败，主 agent 才可回退到手工拼接 Markdown，但必须遵守下文的字段对齐规则。
 
+### 新增：横向竞争定位与价值判断（必须执行）
+
+在生成最终报告前，主 Agent 必须为每篇**精读论文**补做一轮横向定位，默认窗口为**提交日期前后 ±90 天**。可使用 Semantic Scholar、arXiv search API 或其他可复现的论文检索源。
+
+对每篇精读论文至少完成以下工作：
+1. 搜索同期同任务方向论文，优先匹配：
+   - 任务领域
+   - 方法关键词
+   - 目标数据集 / benchmark
+2. 给出竞争定位标签之一：
+   - `首提`
+   - `同期并行`
+   - `跟进`
+   - `跟进但系统化更强`
+   - `工程整合型优化`
+3. 明确比较轴是否一致：
+   - 是否同数据集 / split / metric
+   - 是否同 backbone / model size
+   - 是否使用额外数据 / 额外教师模型
+   - 是否使用更多 test-time compute / search / reranking
+4. 若比较轴不一致，必须显式写“不可直接横比”，禁止硬下结论
+
+同时，对每篇精读论文都要回答以下 checklist：
+- □ 问题意识是否系统级：是在解决 pipeline 级依赖 / 评测设定 / 训练-推理闭环瓶颈，还是仅改局部组件
+- □ 方法新颖性是否在竞争参照下仍成立，不能孤立评价
+- □ 关键实验数字是否已从原文全文核实，并注明对应 setting（dataset / metric / baseline / inference budget）
+- □ 性能提升主要来自方法，还是来自更多数据 / 更大模型 / 更高推理预算
+- □ 推理代价与部署成本是否被论文诚实讨论
+
+这些结论应写回最终报告；若无法完成竞争搜索，必须写明证据不足，不能把主观印象写成定论。
+
 ### 最终综合评分逻辑
 
 OpenJudge 五阶段输出综合为最终评级：
@@ -435,9 +582,13 @@ OpenJudge 五阶段输出综合为最终评级：
 |---|---|
 | 标题 | `title` |
 | 原文链接 | `abs_url` |
+| 论文类型 | `paper_type` |
+| 任务/方法/数据集标签 | `tags.task` / `tags.method_keywords` / `tags.datasets` |
 | 核心贡献 | `analysis.core_contribution` |
 | 实验指标 | `analysis.experiments` |
 | 消融实验 | `analysis.ablation` |
+| 价值判断 checklist | `analysis.checklist.*` |
+| 同期竞争定位 | `openjudge.competition.*` |
 | 越狱检测 | `openjudge.safety.jailbreak` |
 | 格式违规 | `openjudge.safety.format_violations` + `violations_list` |
 | 正确性评分 | `openjudge.correctness.score` + `reasoning` + `key_issues` |
@@ -476,6 +627,22 @@ OpenJudge 五阶段输出综合为最终评级：
 
 并在统计概览中展示动态调度情况，便于回溯执行成本。
 
+### 输出分层规则（新增）
+
+最终日报必须显式分为三层，而不是把所有精读论文等量展开：
+
+1. **优先读（≤3 篇）**
+   - 给出：`为什么值得优先读`、`阅读时该盯什么`、`实验应该怎么看`
+   - 优先分配给：问题意识更系统、竞争定位更清楚、数字核验更完整、并且具有较强外溢价值的论文
+2. **选读（≤3 篇）**
+   - 给出：一句话定位 + 方向标签
+   - 适用于：方向重要但贡献更偏跟进、或受众面较窄的论文
+3. **快评（其余）**
+   - 给出：一句话总结 + 受益读者标签
+   - 禁止只写“不值一读”；若论文较窄，必须明确“推荐给哪些方向的人”
+
+若论文是 Workshop 或明显领域专项工作，可进入“选读/快评”，但**不得与主会主线论文等权排序**，除非其方法贡献和竞争定位有非常充分的证据支撑。
+
 ### 报告模板
 
 > 实际执行时，**优先生成 `--style human` 的版本** 作为最终面向用户的日报；以下模板主要描述 `template` 风格下的字段对齐要求。若需要更像人写的报告，正文应优先采用“`今日关注`（总判断 + 主线展开） / 为什么值得看 / 一句话结论 / 实验亮点 / 我会怎么评价它”的顺序，而不是在正文里直接堆叠全部 OpenJudge 字段。
@@ -490,6 +657,11 @@ OpenJudge 五阶段输出综合为最终评级：
 具体看：
 - 主线 A：...
 - 主线 B：...
+
+> 写结论时必须遵守：
+> - 结论优先建立在“同期竞争参照 + 原文数字核验”上
+> - 若仅是 Workshop / preprint，需显式标注，不得混写成“今日最强”
+> - 若比较轴不一致，使用“值得关注 / 值得跟踪”，不要写成绝对领先
 
 ## 统计概览
 
@@ -507,13 +679,19 @@ OpenJudge 五阶段输出综合为最终评级：
 
 ---
 
-## 精读论文（按最终评分排序）
+## 优先读（≤3 篇）
 
 ### 1. [标题](abs_url) — X/6（Accept）
 
 **原文链接**: [abs_url](abs_url)
 
-**作者**: ... | **分类**: ... | **背景信号**: ...
+**作者**: ... | **分类**: ... | **类型**: main_conference / workshop / preprint / tech_report | **背景信号**: ...
+
+**任务/方法标签**: ...
+
+**竞争定位**: 首提 / 同期并行 / 跟进 / 跟进但系统化更强 / 工程整合型优化
+
+**比较轴说明**: 同数据集/metric/backbone/推理预算？若不可直接横比需明确写出
 
 **调度信息**: `tier={size_tier}` | `pages={pdf_pages}` | `pdf={pdf_size_mb}MB` | `batch_size={recommended_batch_size}`
 
@@ -535,8 +713,22 @@ OpenJudge 五阶段输出综合为最终评级：
 #### 实验指标
 ...
 
+> 所有关键数字必须写成“数字 + setting”，例如：`在 XXX dataset 的 YYY metric 上，相比 ZZZ baseline，从 A 提升到 B；是否使用额外数据/更大模型/更多 test-time compute：...`。
+
 #### 消融实验
 ...
+
+#### 价值判断 checklist
+- 系统级问题意识：...
+- 新颖性竞争参照：...
+- 原文核实数字：...
+- 方法贡献 vs 资源贡献：...
+- 推理/部署成本讨论：...
+
+#### 为什么优先读 / 盯什么 / 怎么看实验
+- 为什么：...
+- 盯什么：...
+- 怎么看实验：...
 
 ---
 
@@ -575,10 +767,20 @@ OpenJudge 五阶段输出综合为最终评级：
 
 ---
 
+## 选读（≤3 篇）
+
+- `[arXiv ID] 标题`：一句话定位。**方向标签**：... | **类型**：main_conference / workshop / preprint / tech_report
+- ...
+
+## 快评（其余）
+
+- `[arXiv ID] 标题`：一句话。**推荐给**：...方向读者 | **类型**：main_conference / workshop / preprint / tech_report
+- ...
+
 ## 摘要快览（总分 2-3 分，未精读）
 
-| # | arXiv ID | 标题 | 新颖 | 重要 | 实验 | 背景 | 总分 | 备注 |
-|---|----------|------|------|------|------|------|------|------|
+| # | arXiv ID | 标题 | 类型 | 新颖 | 重要 | 实验 | 背景 | 总分 | 备注 |
+|---|----------|------|------|------|------|------|------|------|------|
 ...
 
 ## 全量汇总表
