@@ -519,7 +519,7 @@ python3 scripts/paper-read/render_report.py \
 ```
 
 其中：
-- `--style human`：**默认推荐**，生成更适合人读的日报风格；会优先输出统一的 `## 今日关注` 段落，先给总判断，再按主题展开，并在该部分把重点论文写成 `简称 [arxiv_id](link) · score` 的格式。
+- `--style human`：**默认推荐**，生成更适合人读的日报风格；会优先输出统一的 `## 今日关注` 段落，先给总判断，再按主题展开，并在该部分把重点论文写成 `简称（[arxiv_id](link) · score）` 的格式。
 - `--style template`：保留完整字段化模板，更适合调试、验收和结构化检查；同样使用统一的 `## 今日关注` 段落，而不是把“今日结论”和“今天值得关注什么”拆成两个重复 section。
 - `tmp/daily_conclusion.md` 为可选输入；若存在，渲染脚本会将其作为 `## 今日关注` 中的补充说明插入，而不是单独再生成一个重复总结段。
 
@@ -602,9 +602,12 @@ OpenJudge 五阶段输出综合为最终评级：
 
 ### 缺失字段与降级规则
 
-- 若 `visuals.architecture_img` 或 `visuals.benchmark_img` 为空：
+- 若 `visuals.architecture_img` 为空：
   - 主 agent 先尝试依据 `visual_hints` + 本地 PDF 裁图；
   - 若仍失败，则在报告中写 `未提取到合适图片`，不得留空 broken link。
+- `visuals.benchmark_img` 不再作为最终报告默认必需项：
+  - 默认只把 benchmark 结果转写成文字和数字解读；
+  - 仅当用户明确要求时，才在报告中嵌 benchmark 图片。
 - 若 `openjudge.bibcheck.executed = false`：
   - 报告中显示 `参考文献校验：已跳过（原因：...）`；
   - 不得伪造 0 条检查结果冒充“已完成检查”。
@@ -654,9 +657,16 @@ OpenJudge 五阶段输出综合为最终评级：
 
 先说结论：今天最值得关注的主线是……最值得优先读的论文是……
 
+> `今日关注` / 总结段里的重点论文，推荐统一写成：
+> - `HY-World 2.0（[2604.14268](https://arxiv.org/abs/2604.14268) · 5/6）`
+> - `Sketch-to-Multi-View（[2604.14302](https://arxiv.org/abs/2604.14302) · 5/6）`
+> - `DharmaOCR（[2604.14314](https://arxiv.org/abs/2604.14314) · 4/6）`
+>
+> 也就是：**论文简称 + 全角括号 + arXiv 链接 + 分数**。
+
 具体看：
-- 主线 A：...
-- 主线 B：...
+- 主线 A：... 重点论文写作 `论文简称（[arxiv_id](link) · score）`
+- 主线 B：... 重点论文写作 `论文简称（[arxiv_id](link) · score）`
 
 > 写结论时必须遵守：
 > - 结论优先建立在“同期竞争参照 + 原文数字核验”上
@@ -700,12 +710,6 @@ OpenJudge 五阶段输出综合为最终评级：
 ![架构图]({architecture_img})
 
 > 若未裁图成功：写 `未提取到合适图片`；若仅有线索，可追加 `候选线索：{visual_hints.architecture_candidates}`
-
-**结果图 / Benchmark（从 PDF 页面裁整块 Figure/Table）**
-
-![实验结果]({benchmark_img})
-
-> 若未裁图成功：写 `未提取到合适图片`；若仅有线索，可追加 `候选线索：{visual_hints.benchmark_candidates}`
 
 #### 核心贡献
 ...
@@ -794,17 +798,27 @@ OpenJudge 五阶段输出综合为最终评级：
 
 生成最终 Markdown 报告时，**不要只给图片路径，也不要只抽 PDF 内嵌 raster image**。应遵循以下规则：
 
+0. **默认 source-first，而不是 PDF-only**
+   - 对 arXiv 论文，优先尝试 `https://arxiv.org/e-print/{arxiv_id}` 获取 source
+   - 若 source 中存在单独完整 figure 文件，优先直接使用 source 资产
+   - 若 source 中对应 figure 为 TikZ / `\\input{...}` / 多 panel 组合图，则禁止只取其中一个 panel 充当整图
+   - 此时应回退到 PDF caption block 裁图
+
 1. **报告中直接嵌图**
    - 在 Markdown 中直接使用 `![](...)` 展示图片。
    - 不要仅写“图片路径：...”，否则报告可读性很差。
 
-2. **只保留两类图：架构图 + 结果图**
-   - 每篇精读论文最多展示两张：
+2. **最终报告默认只保留流程图 / 架构图**
+   - 每篇精读论文默认最多展示一张：
      - `architecture_img`：模型架构 / 方法流程 / overview / pipeline
-     - `benchmark_img`：主结果表、benchmark 对比、performance/comparison 图
+   - `benchmark_img` 不再默认嵌入最终报告；benchmark 信息优先转写成正文里的数字与 setting 解读。
    - 过滤无关图：定性样例拼贴、作者照片、数据样例、装饰性插图、零散子图。
 
 3. **优先裁完整 Figure/Table block，而不是只抽 embedded image**
+   - 更具体地说：
+     - **先 source**：能拿到完整原图就直接导出
+     - **再 PDF**：当 source 无法可靠恢复整图时，再做 caption/block 裁图
+     - **最后 fallback**：固定坐标裁图只能是最后保底，不应成为默认流程
    - 许多论文中的“架构图”实际上是**整块 figure 区域**，包含：箭头、文字、公式、子图布局。
    - `pdfimages` 只能抽底图，往往会丢失关键标注，因此不应作为最终展示图的唯一来源。
    - 正确做法：根据 `Figure N` / `Fig. N` / `Table N` caption 的位置，从 PDF 页面裁出**完整 figure/table 区域**。
@@ -813,8 +827,8 @@ OpenJudge 五阶段输出综合为最终评级：
    - 架构图优先级：
      - `Figure 1`
      - 若 `Figure 1` 不是方法图，则选择 caption 含 `architecture / framework / overview / pipeline / method / training pipeline` 的 figure
-   - 结果图优先级：
-     - `Table 1`
+   - benchmark 图仅在用户明确要求时才考虑：
+     - 优先 `Table 1`
      - 若 `Table 1` 不是主结果，则选择 caption 含 `benchmark / comparison / evaluation / results / performance` 的 table 或 figure
 
 5. **裁剪启发式**
@@ -823,16 +837,28 @@ OpenJudge 五阶段输出综合为最终评级：
    - 若同页存在多个 figure/table，必须用“当前 caption 到下一 caption”的边界裁切，避免把相邻内容混进来
 
 6. **保存位置建议**
-   - 报告相关图片统一保存到：
+   - 报告默认相关图片统一保存到：
      - `papers/{date}/assets/selected/{arxiv_id}-arch.png`
+   - 若用户明确要求 benchmark 图，才额外保存：
      - `papers/{date}/assets/selected/{arxiv_id}-result.png`
-   - 在 Markdown 中用相对路径直接嵌入：
+   - 在 Markdown 中默认只嵌入：
      - `![...](assets/selected/{arxiv_id}-arch.png)`
-     - `![...](assets/selected/{arxiv_id}-result.png)`
 
 7. **与 reviewer skill 的关系**
    - `paper-read-reviewer` **不再负责访问 HTML、下载图片或裁图**；它只输出 `visual_hints`（如 Figure 1 / Table 1 / caption 关键词）或保留空的 `visuals` 占位；
-   - **最终报告阶段**统一由主 agent 结合本地 PDF 做“图像筛选 + 裁剪 + 嵌入”，这是唯一权威流程。
+   - **最终报告阶段**统一由主 agent 做“图像筛选 + 裁剪 + 嵌入”，但实现顺序更新为：
+     1. 先尝试 arXiv source 提取完整 figure
+     2. source 不可靠时，回退到本地 PDF 的 caption/block 裁图
+   - 默认只嵌流程图，benchmark 图不作为最终报告标准配置。
+
+8. **当前项目中的推荐脚本**
+   - 优先使用：
+     - `scripts/paper-read/extract_report_figures.py`
+   - 该脚本默认执行：
+     - source-first 提取
+     - 单文件 figure 直接导出
+     - 组合/TikZ figure 自动回退到 PDF 裁图
+     - 输出到 `papers/{date}/assets/selected/{arxiv_id}-arch.png`
 
 ---
 
