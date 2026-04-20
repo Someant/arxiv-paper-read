@@ -649,6 +649,12 @@ OpenJudge 五阶段输出综合为最终评级：
 ### 报告模板
 
 > 实际执行时，**优先生成 `--style human` 的版本** 作为最终面向用户的日报；以下模板主要描述 `template` 风格下的字段对齐要求。若需要更像人写的报告，正文应优先采用“`今日关注`（总判断 + 主线展开） / 为什么值得看 / 一句话结论 / 实验亮点 / 我会怎么评价它”的顺序，而不是在正文里直接堆叠全部 OpenJudge 字段。
+>
+> **新增排版经验（2026-04-20）**
+> - `报告流程图`、`预筛选总表` 这类流程/验收/调试信息，默认放在**正文最后**，不要顶在开头打断阅读。
+> - 每篇论文若有 `一句话评价`，默认放在 `**预筛选分**：**X/6**` 的**正下方**，不要单独拖到文末再写一个小节。
+> - `方法流程图` 部分默认只保留**一份图**：优先保留从 arXiv source 提取的原始方法图；若已放原图，就不要再并排保留 Mermaid 复写版。
+> - 图下方默认**不写**“论文 source 方法图（从 arXiv source 提取）”“source: ...”这类实现说明；除非用户明确要求保留 provenance，报告里只放图本身。
 
 ```markdown
 # arXiv {category} 论文解读 — {YYYY-MM-DD}
@@ -859,6 +865,10 @@ OpenJudge 五阶段输出综合为最终评级：
      - 单文件 figure 直接导出
      - 组合/TikZ figure 自动回退到 PDF 裁图
      - 输出到 `papers/{date}/assets/selected/{arxiv_id}-arch.png`
+   - **新增经验（2026-04-20）**：source-first 虽然是默认策略，但启发式仍可能挑到 teaser / qualitative figure，而不是真正的方法图。遇到这种情况时：
+     1. 先检查 source 中的 `main.tex` / `chapter-03-method.tex` / `sec/3_method.tex` 等方法章节；
+     2. 优先选 `Figure 1` 或 caption 含 `overview / framework / pipeline / procedure / method` 的单文件图；
+     3. 若自动选择仍不对，允许通过脚本 override 指定 source 资产，**但最终报告仍只保留一张图**。
 
 ---
 
