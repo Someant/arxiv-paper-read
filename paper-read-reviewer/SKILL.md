@@ -189,18 +189,18 @@ PDF提取质量说明：PDF解析出的参考文献普遍存在换行符乱入�
 - unverifiable比例高或 BibChecker 被跳过 → 不影响评分；可在 score_adjustments 中标注 "PDF提取质量限制参考文献分析" 或 "BibChecker skipped"
 
 ================================================================
-第五步：生成视觉线索（不下载图片、不访问 HTML）
+第五步：生成视觉线索（必须给 reviewer 后处理使用）
 ================================================================
 
-你**不负责**访问 arXiv HTML、下载图片或裁剪 figure/table。图片最终由主 agent 在报告阶段统一从本地 PDF 中裁剪。
+你**不负责**访问 arXiv HTML 或手工编写图片下载逻辑，但你必须为本地自动抽图提供足够线索，并在写完 JSON 后立即触发单篇抽图后处理。
 
-你只需要基于论文全文，为主 agent 提供轻量视觉线索：
+你需要先基于论文全文给出轻量视觉线索：
 1. 优先给出最可能对应架构图的方法图位置，例如：`Figure 1`、`Fig. 2`、或 caption 关键词 `architecture / framework / overview / pipeline / method`
 2. 优先给出最可能对应 benchmark 主结果的位置，例如：`Table 1`、`Figure 3`、或 caption 关键词 `results / comparison / benchmark / performance / evaluation`
 3. 若无法判断，填空数组，不得编造 URL
 
 ================================================================
-第六步：将全部结果写入文件（最终动作，必须执行）
+第六步：将全部结果写入文件（必须执行）
 ================================================================
 
 使用 Write 工具将以下格式的完整 JSON 写入 /tmp/arxiv_results/{arxiv_id}.json：
@@ -278,9 +278,28 @@ PDF提取质量说明：PDF解析出的参考文献普遍存在换行符乱入�
   },
   "visuals": {
     "architecture_img": null,
-    "benchmark_img": null
+    "benchmark_img": null,
+    "benchmark_markdown": null
   }
 }
 
-写入成功后，输出一行确认文字：✅ {arxiv_id} 完成，结果已写入 /tmp/arxiv_results/{arxiv_id}.json
+================================================================
+第七步：立刻补方法图到当前 reviewer 结果（必须尝试）
+================================================================
+
+在上一步 JSON 写入成功后，使用 Bash 工具立刻执行：
+
+python3 scripts/paper-read/reviewer_attach_visuals.py \
+  --result-json /tmp/arxiv_results/{arxiv_id}.json \
+  --pdf-path {pdf_path} \
+  --arxiv-id {arxiv_id} \
+  --title "{title}"
+
+要求：
+- 这是 reviewer 阶段的一部分，必须尝试执行，不能留给主 agent 猜测。
+- 该脚本会复用仓库现有抽图逻辑，把方法图写到 `visuals.architecture_img`。
+- 若脚本输出 warning，保留已有 JSON，不要手工伪造图片路径。
+- 执行后可再次用 Read 工具检查 `/tmp/arxiv_results/{arxiv_id}.json`，确认 `visuals` 字段是否已被回写。
+
+完成后，输出一行确认文字：✅ {arxiv_id} 完成，结果已写入 /tmp/arxiv_results/{arxiv_id}.json，并已尝试补齐 visuals
 ```
